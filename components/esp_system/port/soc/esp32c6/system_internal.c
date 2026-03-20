@@ -29,6 +29,7 @@
 #include "esp32c6/rom/cache.h"
 #include "esp32c6/rom/rtc.h"
 #include "soc/pcr_reg.h"
+#include "soc/usb_serial_jtag_reg.h"
 
 void esp_system_reset_modules_on_exit(void)
 {
@@ -135,6 +136,15 @@ void esp_restart_noos(void)
 #if !CONFIG_IDF_ENV_FPGA
     rtc_clk_cpu_set_to_default_config();
 #endif
+
+    // De-assert USB Serial/JTAG D+ pull-up to force the host to detect a USB disconnect.
+    // Without this, a software reset leaves D+ asserted and the host retains stale USB state,
+    // making the device unrecoverable without a physical VBUS power cycle.
+    CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_DP_PULLUP);
+    SET_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_PAD_PULL_OVERRIDE);
+
+    // Brief delay for the host to detect the SE0 (disconnect) condition.
+    esp_rom_delay_us(10000);
 
     // Reset PRO CPU
     esp_rom_software_reset_cpu(0);
