@@ -63,3 +63,10 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # Core Dump — saves crash state to flash for post-mortem analysis
 #
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+
+#
+# Task Watchdog — ensures recovery from firmware hangs via panic + USB re-enumeration
+#
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+CONFIG_ESP_TASK_WDT_PANIC=y
