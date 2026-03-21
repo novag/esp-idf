@@ -30,6 +30,7 @@
 #include "esp32c6/rom/rtc.h"
 #include "soc/pcr_reg.h"
 #include "soc/usb_serial_jtag_reg.h"
+#include "hal/usb_serial_jtag_ll.h"
 
 void esp_system_reset_modules_on_exit(void)
 {
@@ -145,6 +146,11 @@ void esp_restart_noos(void)
 
     // Brief delay for the host to detect the SE0 (disconnect) condition.
     esp_rom_delay_us(10000);
+
+    // Reset the USB Serial/JTAG peripheral to clear any corrupted internal state
+    // (stuck DMA descriptors, endpoint buffer overflow, etc.) that a CPU-only reset
+    // would not clear. The bootloader will re-initialize the peripheral on startup.
+    usb_serial_jtag_ll_reset_register();
 
     // Reset PRO CPU
     esp_rom_software_reset_cpu(0);
