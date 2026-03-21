@@ -58,3 +58,8 @@ CONFIG_FREERTOS_HZ=1000
 #
 CONFIG_OPENTHREAD_RCP_SPINEL_CONSOLE=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+#
+# Core Dump — saves crash state to flash for post-mortem analysis
+#
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
