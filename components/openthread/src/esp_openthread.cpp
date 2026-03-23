@@ -8,6 +8,9 @@
 #include "esp_openthread.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
+#include <errno.h>
+#include <stdio.h>
+#include "esp_system.h"
 #include "esp_openthread_border_router.h"
 #include "esp_openthread_common_macro.h"
 #include "esp_openthread_cli.h"
@@ -215,12 +218,10 @@ esp_err_t esp_openthread_launch_mainloop(void)
             }
             esp_openthread_lock_release();
             if (error != ESP_OK) {
-                ESP_LOGE(OT_PLAT_LOG_TAG, "esp_openthread_platform_process failed");
                 break;
             }
         } else {
-            error = ESP_FAIL;
-            ESP_LOGE(OT_PLAT_LOG_TAG, "OpenThread system polling failed");
+            error = (esp_err_t)(0x10000 | (errno & 0xFFFF));
             break;
         }
     }
@@ -261,11 +262,20 @@ static void ot_task_worker(void *aContext)
     xSemaphoreGive(s_ot_syn_semaphore);
 
     // Run the main loop
-    esp_openthread_launch_mainloop();
+    esp_err_t mainloop_err = esp_openthread_launch_mainloop();
 
 #if CONFIG_OPENTHREAD_RADIO
-    ESP_LOGE(OT_PLAT_LOG_TAG, "RCP deinitialization is not supported for now");
-    assert(false);
+    // The RCP mainloop should never exit. Abort with the error in the panic
+    // message so it's visible in the coredump without needing console access.
+    char abort_msg[80];
+    if ((unsigned)mainloop_err & 0x10000) {
+        snprintf(abort_msg, sizeof(abort_msg), "RCP mainloop exited: USB read errno=%d",
+                 (int)(mainloop_err & 0xFFFF));
+    } else {
+        snprintf(abort_msg, sizeof(abort_msg), "RCP mainloop exited: %s (0x%x)",
+                 esp_err_to_name(mainloop_err), (unsigned)mainloop_err);
+    }
+    esp_system_abort(abort_msg);
 #endif
 #if CONFIG_OPENTHREAD_CLI
     esp_openthread_cli_console_command_unregister();
