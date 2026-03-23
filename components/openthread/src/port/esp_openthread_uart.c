@@ -200,8 +200,7 @@ esp_err_t esp_openthread_uart_process(otInstance *instance, const esp_openthread
 #endif
     } else if (rval < 0) {
         if (errno != EAGAIN) {
-            ESP_LOGW(OT_PLAT_LOG_TAG, "read uart failed: %d", errno);
-            return ESP_FAIL;
+            return (esp_err_t)(0x10000 | (errno & 0xFFFF));
         }
     }
     return ESP_OK;
