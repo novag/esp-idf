@@ -20,7 +20,6 @@
 #include "esp_openthread_state.h"
 #include "esp_openthread_task_queue.h"
 #include "esp_openthread_types.h"
-#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "lwip/dns.h"
 #include "openthread/instance.h"
@@ -187,14 +186,7 @@ esp_err_t esp_openthread_launch_mainloop(void)
     esp_err_t error = ESP_OK;
     s_ot_mainloop_running = true;
 
-#if CONFIG_ESP_TASK_WDT_EN
-    esp_task_wdt_add(NULL);
-#endif
-
     while (s_ot_mainloop_running) {
-#if CONFIG_ESP_TASK_WDT_EN
-        esp_task_wdt_reset();
-#endif
         FD_ZERO(&mainloop.read_fds);
         FD_ZERO(&mainloop.write_fds);
         FD_ZERO(&mainloop.error_fds);
@@ -232,9 +224,6 @@ esp_err_t esp_openthread_launch_mainloop(void)
             break;
         }
     }
-#if CONFIG_ESP_TASK_WDT_EN
-    esp_task_wdt_delete(NULL);
-#endif
     return error;
 }
 
