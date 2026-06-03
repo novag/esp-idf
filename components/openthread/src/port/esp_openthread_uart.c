@@ -199,7 +199,12 @@ esp_err_t esp_openthread_uart_process(otInstance *instance, const esp_openthread
         otPlatUartReceived(s_uart_buffer, (uint16_t)rval);
 #endif
     } else if (rval < 0) {
-        if (errno != EAGAIN) {
+        // EAGAIN means no data is currently available. errno == 0 guards against an
+        // older USB Serial/JTAG driver (IDF-14303) returning -1 without setting errno
+        // when the host is transiently "not connected". For an RCP a host disconnect
+        // is normal and recoverable, so treat both as "no data" and keep looping
+        // instead of aborting the firmware.
+        if (errno != EAGAIN && errno != 0) {
             return (esp_err_t)(0x10000 | (errno & 0xFFFF));
         }
     }

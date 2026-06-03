@@ -230,7 +230,11 @@ static void usb_serial_jtag_return_char(int fd, int c)
 static ssize_t usb_serial_jtag_read(__attribute__((unused)) void *ctx, int fd, void* data, size_t size)
 {
     if (!usb_serial_jtag_is_connected()) {
-        // TODO: IDF-14303
+        // No host connected: behave like a non-blocking fd with no data available
+        // and set errno so callers can distinguish this from a fatal read error and
+        // simply retry. Previously errno was left untouched (IDF-14303), which made
+        // a transient disconnect look like an unset-errno failure to the caller.
+        errno = EWOULDBLOCK;
         return -1;
     }
     assert(fd == USJ_LOCAL_FD);
