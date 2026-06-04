@@ -26,6 +26,11 @@
 #include "driver/usb_serial_jtag_vfs.h"
 #include "driver/usb_serial_jtag.h"
 #if CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG
+#include <string.h>
+#include "esp_attr.h"
+#include "esp_timer.h"
+#include "esp_system.h"
+#include "esp_rom_sys.h"
 #include "hal/usb_serial_jtag_ll.h"
 #endif
 
@@ -34,6 +39,118 @@ static int s_uart_fd = -1;
 static bool s_uart_driver_installed = false;
 static uint8_t s_uart_buffer[ESP_OPENTHREAD_UART_BUFFER_SIZE];
 static const char *uart_workflow = "uart";
+
+#if CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG
+// ---------------------------------------------------------------------------
+// USB-Serial/JTAG link-wedge recovery + diagnostics (related to IDF-14303).
+//
+// The USB connection monitor can latch usb_serial_jtag_is_connected()==false and
+// never recover (e.g. a false disconnect from FreeRTOS tick jitter when FREERTOS_HZ
+// equals the 1ms USB SOF rate, or a real host bus event). When that happens the RCP
+// keeps running but the VFS read()/write() are gated on the connection flag, so it
+// goes deaf+mute and the host sees endless spinel timeouts with no crash and no reboot.
+//
+// esp_restart() on the ESP32-C6 is a CPU-only reset (esp_rom_software_reset_cpu) that
+// does NOT re-initialize the USB peripheral/PHY, so it cannot recover the link. A full
+// system (digital-core) reset via esp_rom_software_reset_system() re-enumerates the
+// USB-Serial/JTAG link exactly like an esptool reset, which is the only thing observed
+// to recover it. This watchdog forces that reset if the link stays dead, and records
+// persistent (RTC-RAM, survives reset) diagnostics so the failure mechanism can be
+// confirmed from a later esptool memory/flash read-out.
+// ---------------------------------------------------------------------------
+
+// Force a recovery reset after the connection monitor has reported "disconnected"
+// continuously for this long (the observed wedge condition)...
+#define ESP_OT_RCP_USB_DISCONNECT_TIMEOUT_US   (30LL * 1000 * 1000)
+// ...or, as a backstop for any other "deaf" mode, after this long with zero bytes RX.
+#define ESP_OT_RCP_USB_RX_SILENCE_TIMEOUT_US   (180LL * 1000 * 1000)
+
+#define ESP_OT_RCP_USB_DIAG_MAGIC 0x4f544442u  // "OTDB"
+
+typedef struct {
+    uint32_t magic;
+    uint32_t boot_count;        // total boots since power-on (RTC RAM survives reset)
+    int32_t  last_reset_reason; // esp_reset_reason() observed at the latest boot
+    uint32_t disconnect_events; // usb_serial_jtag_is_connected() true->false transitions
+    uint32_t reconnect_events;  // false->true transitions (stays flat if monitor never recovers)
+    uint32_t max_disconnect_ms; // longest observed not-connected streak
+    uint32_t watchdog_resets;   // times this watchdog forced a recovery reset
+    uint32_t last_wedge_kind;   // 1 = disconnect timeout, 2 = rx-silence backstop
+} esp_ot_rcp_usb_diag_t;
+
+static RTC_NOINIT_ATTR esp_ot_rcp_usb_diag_t s_usb_diag;
+
+static void esp_openthread_rcp_usb_diag_init(void)
+{
+    if (s_usb_diag.magic != ESP_OT_RCP_USB_DIAG_MAGIC) {
+        memset(&s_usb_diag, 0, sizeof(s_usb_diag));
+        s_usb_diag.magic = ESP_OT_RCP_USB_DIAG_MAGIC;
+    }
+    s_usb_diag.boot_count++;
+    s_usb_diag.last_reset_reason = (int32_t)esp_reset_reason();
+}
+
+static void esp_openthread_rcp_usb_link_watchdog(bool received_data)
+{
+    static bool s_initialized = false;
+    static bool s_ever_received = false;
+    static int64_t s_last_rx_us;
+    static int64_t s_disconnected_since_us;
+    static bool s_was_connected;
+
+    int64_t now = esp_timer_get_time();
+    if (!s_initialized) {
+        s_last_rx_us = now;
+        s_disconnected_since_us = 0;
+        s_was_connected = true;
+        s_initialized = true;
+    }
+    if (received_data) {
+        s_last_rx_us = now;
+        s_ever_received = true;
+    }
+
+    bool connected = usb_serial_jtag_is_connected();
+    if (connected != s_was_connected) {
+        if (connected) {
+            s_usb_diag.reconnect_events++;
+        } else {
+            s_usb_diag.disconnect_events++;
+        }
+        s_was_connected = connected;
+    }
+
+    if (connected) {
+        s_disconnected_since_us = 0;
+    } else {
+        if (s_disconnected_since_us == 0) {
+            s_disconnected_since_us = now;
+        }
+        uint32_t streak_ms = (uint32_t)((now - s_disconnected_since_us) / 1000);
+        if (streak_ms > s_usb_diag.max_disconnect_ms) {
+            s_usb_diag.max_disconnect_ms = streak_ms;
+        }
+    }
+
+    bool disconnect_wedge = (s_disconnected_since_us != 0) &&
+                            (now - s_disconnected_since_us > ESP_OT_RCP_USB_DISCONNECT_TIMEOUT_US);
+    // Only treat RX silence as a wedge while the monitor also reports "disconnected".
+    // A connected-but-idle link (e.g. otbr-agent stopped for maintenance, or a quiet
+    // network) is not a fault and must not be reset.
+    bool rx_silence_wedge = !connected &&
+                            (now - s_last_rx_us > ESP_OT_RCP_USB_RX_SILENCE_TIMEOUT_US);
+
+    // Only recover a link that was previously working, so a standalone/no-host boot
+    // (or a recovery that fails to re-establish the link) cannot become a reset loop.
+    if (s_ever_received && (disconnect_wedge || rx_silence_wedge)) {
+        s_usb_diag.watchdog_resets++;
+        s_usb_diag.last_wedge_kind = disconnect_wedge ? 1u : 2u;
+        // Full digital-core reset -> clean USB re-enumeration. esp_restart() would be a
+        // CPU-only reset on C6 and would leave the wedged USB peripheral untouched.
+        esp_rom_software_reset_system();
+    }
+}
+#endif // CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG
 
 #if (CONFIG_OPENTHREAD_CLI || (CONFIG_OPENTHREAD_RADIO && (CONFIG_OPENTHREAD_RCP_UART || CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG)))
 otError otPlatUartEnable(void)
@@ -160,6 +277,8 @@ esp_err_t esp_openthread_host_rcp_usb_init(const esp_openthread_platform_config_
     ESP_ERROR_CHECK(usb_serial_jtag_vfs_register());
     usb_serial_jtag_vfs_use_driver();
 
+    esp_openthread_rcp_usb_diag_init();
+
     s_uart_fd = open("/dev/usbserjtag", O_RDWR | O_NONBLOCK);
     ESP_RETURN_ON_FALSE(s_uart_fd >= 0, ESP_FAIL, OT_PLAT_LOG_TAG, "open usbserjtag failed");
     ret = esp_openthread_platform_workflow_register(&esp_openthread_uart_update, &esp_openthread_uart_process,
@@ -208,5 +327,8 @@ esp_err_t esp_openthread_uart_process(otInstance *instance, const esp_openthread
             return (esp_err_t)(0x10000 | (errno & 0xFFFF));
         }
     }
+#if CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG
+    esp_openthread_rcp_usb_link_watchdog(rval > 0);
+#endif
     return ESP_OK;
 }

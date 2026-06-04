@@ -22,8 +22,13 @@ static esp_pm_lock_handle_t s_usb_serial_jtag_pm_lock;
 
 // FreeRTOS tick interrupt may get delayed in handling, which could lead to no SOF coming in within the period from
 // a delayed tick to the following tick. Therefore, when FREERTOS_HZ is comparable to SOF packet frequency, a NO_SOF
-// tolerance needs to be given to avoid a false disconnection detection.
+// tolerance needs to be given to avoid a false disconnection detection. Configurable via
+// CONFIG_USJ_DISCONNECT_CONFIRM_PERIOD_MS (raise it when running at a high FREERTOS_HZ).
+#ifdef CONFIG_USJ_DISCONNECT_CONFIRM_PERIOD_MS
+#define USJ_DISCONNECT_CONFIRM_PERIOD_MS    CONFIG_USJ_DISCONNECT_CONFIRM_PERIOD_MS
+#else
 #define USJ_DISCONNECT_CONFIRM_PERIOD_MS    3
+#endif
 #define ALLOWED_NO_SOF_TICKS                pdMS_TO_TICKS(USJ_DISCONNECT_CONFIRM_PERIOD_MS)
 
 static uint32_t remaining_allowed_no_sof_ticks;

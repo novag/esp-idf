@@ -14,6 +14,19 @@ menu "ESP-Driver:USB Serial/JTAG Configuration"
             the bootloader stage, so you can continue to use it to flash the chip in download mode.
             To disable it completely, you must burn the EFUSE_DIS_USB_SERIAL_JTAG eFuse.
 
+    config USJ_DISCONNECT_CONFIRM_PERIOD_MS
+        int "USB Serial/JTAG disconnect confirmation period (ms)"
+        default 3
+        range 1 1000
+        help
+            The connection monitor declares the USB Serial/JTAG host "disconnected" only
+            after no USB SOF packet is observed for this many milliseconds. The check runs
+            in the FreeRTOS tick hook, so when CONFIG_FREERTOS_HZ approaches the 1 ms USB SOF
+            rate (e.g. 1000 Hz) a too-small value can cause FALSE disconnect detections from
+            ordinary tick jitter. Increase this (e.g. to 20-50) when running at a high tick
+            rate to make connection detection robust. Larger values only delay detection of a
+            genuine disconnect, which matters solely for power-management/light-sleep handoff.
+
     config USJ_NO_AUTO_LS_ON_CONNECTION
         bool "Don't enter the automatic light sleep when USB Serial/JTAG port is connected"
         depends on PM_ENABLE && ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED && !SOC_USB_SERIAL_JTAG_SUPPORT_LIGHT_SLEEP \
