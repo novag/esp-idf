@@ -79,7 +79,14 @@ typedef struct {
     uint32_t reconnect_events;  // false->true transitions (stays flat if monitor never recovers)
     uint32_t max_disconnect_ms; // longest observed not-connected streak
     uint32_t watchdog_resets;   // times this watchdog forced a recovery reset
-    uint32_t last_wedge_kind;   // 1 = disconnect timeout, 2 = rx-silence backstop
+    uint32_t last_wedge_kind;   // 1 = sustained-disconnect, 2 = deaf-despite-connected
+    // --- USB peripheral forensic snapshot: WHY does the data path die? ---
+    uint32_t usb_int_raw_accum;     // OR of USB_SERIAL_JTAG.int_raw across this boot. Sticky bits
+                                    // the driver never clears reveal the trigger: bit9 usb_bus_reset,
+                                    // bits4-7 pid_err/crc5_err/crc16_err/stuff_err, bit13 dtr_chg.
+    uint32_t usb_int_raw_at_wedge;  // int_raw snapshot at the moment the watchdog detects "deaf"
+    uint32_t usb_conf0_at_wedge;    // CONF0 at wedge: bit8 pad_pull_override, bit9 dp_pullup, bit0 phy_sel
+    uint32_t usb_chip_rst_at_wedge; // chip_rst reg at wedge: bit0 host RTS, bit1 host DTR (port open?)
 } esp_ot_rcp_usb_diag_t;
 
 static RTC_NOINIT_ATTR esp_ot_rcp_usb_diag_t s_usb_diag;
@@ -92,6 +99,7 @@ static void esp_openthread_rcp_usb_diag_init(void)
     }
     s_usb_diag.boot_count++;
     s_usb_diag.last_reset_reason = (int32_t)esp_reset_reason();
+    s_usb_diag.usb_int_raw_accum = 0;  // accumulate fresh per boot session
 }
 
 static void esp_openthread_rcp_usb_link_watchdog(bool received_data)
@@ -113,6 +121,11 @@ static void esp_openthread_rcp_usb_link_watchdog(bool received_data)
         s_last_rx_us = now;
         s_ever_received = true;
     }
+
+    // Accumulate the USB interrupt-raw bits. The driver only ever clears sof / serial_out_recv_pkt /
+    // serial_in_empty, so bus_reset, the USB error bits, and dtr/rts changes stay latched here and
+    // tell us what happened on the link by the time we read this out after a wedge+reset.
+    s_usb_diag.usb_int_raw_accum |= usb_serial_jtag_ll_get_intraw_mask();
 
     bool connected = usb_serial_jtag_is_connected();
     if (connected != s_was_connected) {
@@ -156,6 +169,11 @@ static void esp_openthread_rcp_usb_link_watchdog(bool received_data)
     if (deaf_despite_connected || sustained_disconnect) {
         s_usb_diag.watchdog_resets++;
         s_usb_diag.last_wedge_kind = sustained_disconnect ? 1u : 2u;  // 1=disconnect, 2=deaf-despite-connected
+        // Forensic snapshot of the USB peripheral at the wedge, so the cause of the data-path
+        // death is readable from RTC RAM after the recovery reset.
+        s_usb_diag.usb_int_raw_at_wedge = usb_serial_jtag_ll_get_intraw_mask();
+        s_usb_diag.usb_conf0_at_wedge = USB_SERIAL_JTAG.conf0.val;
+        s_usb_diag.usb_chip_rst_at_wedge = USB_SERIAL_JTAG.chip_rst.val;
         // Full digital-core reset -> clean USB re-enumeration. esp_restart() would be a
         // CPU-only reset on C6 and would leave the wedged USB peripheral untouched.
         esp_rom_software_reset_system();
