@@ -44,11 +44,15 @@ static const char *uart_workflow = "uart";
 // ---------------------------------------------------------------------------
 // USB-Serial/JTAG link-wedge recovery + diagnostics (related to IDF-14303).
 //
-// The USB connection monitor can latch usb_serial_jtag_is_connected()==false and
-// never recover (e.g. a false disconnect from FreeRTOS tick jitter when FREERTOS_HZ
-// equals the 1ms USB SOF rate, or a real host bus event). When that happens the RCP
-// keeps running but the VFS read()/write() are gated on the connection flag, so it
-// goes deaf+mute and the host sees endless spinel timeouts with no crash and no reboot.
+// The RCP can keep running yet go deaf+mute over USB (host sees endless spinel
+// timeouts, no crash, no reboot) in two distinct ways:
+//   1. conn_status latches false: the connection monitor reports disconnected (e.g. a
+//      false disconnect from FreeRTOS tick jitter when FREERTOS_HZ==1ms SOF rate, or a
+//      real bus event) and the VFS read()/write() are gated off.
+//   2. deaf-despite-connected: the USB data path dies while the connection monitor still
+//      reads "connected" (conn_status stays TRUE) -- the CONFIRMED real failure, seen
+//      both spontaneously after hours and after a simultaneous host+RCP power-on.
+//      conn_status gives NO signal for it, so recovery must key on "have I received data".
 //
 // esp_restart() on the ESP32-C6 is a CPU-only reset (esp_rom_software_reset_cpu) that
 // does NOT re-initialize the USB peripheral/PHY, so it cannot recover the link. A full
@@ -132,19 +136,26 @@ static void esp_openthread_rcp_usb_link_watchdog(bool received_data)
         }
     }
 
-    bool disconnect_wedge = (s_disconnected_since_us != 0) &&
-                            (now - s_disconnected_since_us > ESP_OT_RCP_USB_DISCONNECT_TIMEOUT_US);
-    // Only treat RX silence as a wedge while the monitor also reports "disconnected".
-    // A connected-but-idle link (e.g. otbr-agent stopped for maintenance, or a quiet
-    // network) is not a fault and must not be reset.
-    bool rx_silence_wedge = !connected &&
-                            (now - s_last_rx_us > ESP_OT_RCP_USB_RX_SILENCE_TIMEOUT_US);
+    // Deaf-despite-connected: the link reports connected (host SOF is present) but we
+    // have received no data for a long time. This is the CONFIRMED real failure -- caught
+    // in-band with diagnostics on 2026-06-08 (deaf ~7h; diag showed conn_status healthy
+    // the whole time: disconnect_events==reconnect_events, max_disconnect_ms==0,
+    // watchdog_resets==0) and identical to the power-on event. The USB data path dies
+    // while the connection monitor still reads "connected", so conn_status never goes
+    // false and the disconnect path below never triggers. Gating on `connected` (a host
+    // is present) keeps a board with no host attached from reset-looping; deliberately
+    // NOT gating on s_ever_received so this also recovers a link that came up broken from
+    // the very first boot (the power-on variant, where no byte is ever received).
+    bool deaf_despite_connected = connected &&
+                                  (now - s_last_rx_us > ESP_OT_RCP_USB_RX_SILENCE_TIMEOUT_US);
+    // Sustained disconnect: SOF genuinely gone for a long time (conn_status latched
+    // false). Gated on s_ever_received so a no-host board cannot reset-loop.
+    bool sustained_disconnect = s_ever_received && (s_disconnected_since_us != 0) &&
+                                (now - s_disconnected_since_us > ESP_OT_RCP_USB_DISCONNECT_TIMEOUT_US);
 
-    // Only recover a link that was previously working, so a standalone/no-host boot
-    // (or a recovery that fails to re-establish the link) cannot become a reset loop.
-    if (s_ever_received && (disconnect_wedge || rx_silence_wedge)) {
+    if (deaf_despite_connected || sustained_disconnect) {
         s_usb_diag.watchdog_resets++;
-        s_usb_diag.last_wedge_kind = disconnect_wedge ? 1u : 2u;
+        s_usb_diag.last_wedge_kind = sustained_disconnect ? 1u : 2u;  // 1=disconnect, 2=deaf-despite-connected
         // Full digital-core reset -> clean USB re-enumeration. esp_restart() would be a
         // CPU-only reset on C6 and would leave the wedged USB peripheral untouched.
         esp_rom_software_reset_system();
